@@ -1,0 +1,55 @@
+---
+title: "DEGs by DESeq2"
+author: "Hong Jiang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    fig_caption: yes
+    theme:
+      bootswatch: sandstone
+      base_font:
+        "Arial"
+      code_font:
+        google: "JetBrains Mono"
+      progress-bar-bg: "orange"
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+## set work dir as this file's dir
+setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+```
+```{r library, include = TRUE}
+library(stats)
+library(dplyr)
+```
+```{r function, include = TRUE}
+## function to adjust p values from a table with fdr method
+## input: a table with p values
+## output: a table with p values and adjusted p values
+bh <- function(fi) {
+    table <- read.table(paste(path, fi, sep = "", collapse = ""), header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+    table <- table |> mutate(p.adjust_x = p.adjust(pval_x, method = "BH"), p.adjust_y = p.adjust(pval_y, method = "BH"))
+    write.table(table, file = paste(path, 'bh', fi, sep='', collapse = ''), sep = "\t", quote = FALSE, row.names = FALSE)
+}
+```
+```{r read data, include = TRUE}
+path = "../output/gsea_hallmark/"
+fis = list.files(path, pattern = "_all.tsv$", full.names = F)
+lapply(fis, bh)
+
+bh("Fibroblast.tsv")
+bh("VEC.tsv")
+bh("Hofbauer cells.tsv")
+bh("CTB.tsv")
+```
+```{r read data, include = TRUE}
+```
