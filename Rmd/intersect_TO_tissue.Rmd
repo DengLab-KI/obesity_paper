@@ -1,0 +1,55 @@
+---
+title: "DEGs Intersect"
+author: "Hong Jiang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    fig_caption: yes
+    theme:
+      bootswatch: sandstone
+      base_font:
+        "Arial"
+      code_font:
+        google: "JetBrains Mono"
+      progress-bar-bg: "orange"
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+## set work dir as this file's dir
+setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+```
+```{r library, include = TRUE}
+library(UpSetR)
+library(tidyverse)
+library(readxl)
+```
+### upsetr
+```{r upsetr, include = TRUE, echo= TRUE, eval = FALSE}
+source("/mnt/data/hong/customized_scripts/snRNAtools/gene_level/intersect_report.R")
+## read in excel file
+comparison <- c("O-AGA_vs_N-AGA", "O-LAGA_vs_N-AGA", "O-LAGA_vs_O-AGA")
+mktable.comparison <- function(comparison){
+    myData <- read_excel(paste(c("../output/DEGs/with_TO/", comparison, "_input.xlsx"), sep = "", collapse = ""), sheet=1)
+    if (sum(lengths(myData))>0){
+    mk_upsetr_table_from_list(myData, paste(c("degs_", comparison), sep = "", collapse = ""), "hsapiens")}
+    # degs.file <- paste(c("degs_", celltype, "_upsetr.csv"), sep="", collapse="")
+    # if (file.exists(degs.file)){
+    # degs_upsetr_table <- read.csv(degs.file, header = T)
+    # pdf(paste(c('../figures/DEGs/', celltype, '_upsetr.pdf'), sep="", collapse=""), width = 10, height = 6)
+    # fig <- upset(degs_upsetr_table, nsets = 6, keep.order = T)
+    # print(fig)
+    # # plot(upset(degs_upsetr_table, nsets = 6))
+    # dev.off()
+    # }
+}
+lapply(comparison, mktable.comparison)
+```
