@@ -1,0 +1,404 @@
+---
+title: "DESeq2 Plots"
+subtitle: "Trophoblast organoids collected at passage 3"
+author: "Data analysis: Paulo Jannig | Karolinska Institutet"
+date: "`r paste('Last update:', format(Sys.time(), '%B %d, %Y'))`"
+output: 
+  html_document:
+    toc: true
+    toc_float: 
+      collapsed: false
+    toc_depth: 3
+    number_sections: true
+    theme: spacelab
+    highlight: default
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+## set work dir as this script's dir
+#setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+
+```
+
+
+```{r}
+# define variables ==========================================
+filename_prefix <- "" # leave empty if not necessary
+species <- "human" # mouse, human, pig, rat
+ensembl_version <- 102 # define ensembl release version
+
+file_formats <- list(
+  #"png",
+  "pdf"
+)
+
+# load libraries
+required_Packages_Install <- c("tidyverse",
+                               "pheatmap",
+                               "ggtext",
+                               "RColorBrewer",
+                               "scico",
+                               "writexl",
+                               "ggrepel",
+                               "ggvenn",
+                               "scales"
+                               )
+
+
+for(Package in required_Packages_Install){
+  if(!require(Package,character.only = TRUE)) { 
+    BiocManager::install(Package, dependencies=TRUE)
+  }
+  library(Package,character.only = TRUE)
+}
+
+# source custom functions
+source("load_functions.R") # source custom functions
+```
+
+# Import data
+
+## Normalized counts
+```{r}
+normalized_counts <- readRDS("../02_results/deseq2/deseq2_normalized_counts.Rds")
+```
+
+## Metadata
+```{r}
+metadata <- readRDS("../01_metadata/metadata.Rds")
+colnames(metadata)
+metadata$sample_id
+unique(metadata$Group)
+```
+## Contrasts
+```{r}
+high_BMI_vs_Control <- readRDS("../02_results/deseq2/deseq2_high_BMI_vs_Control_lfcShrink.RDS")
+
+T1D_vs_Control <- readRDS("../02_results/deseq2/deseq2_T1D_vs_Control_lfcShrink.RDS")
+
+contrasts <- list(
+  high_BMI_vs_Control = high_BMI_vs_Control,
+  T1D_vs_Control = T1D_vs_Control
+)
+```
+
+```{r}
+
+high_BMI_vs_Control.sig <- high_BMI_vs_Control %>% filter(padj<0.05)
+T1D_vs_Control.sig <- T1D_vs_Control %>% filter(padj<0.05)
+
+```
+
+
+
+## Heatmaps
+
+define color palette
+```{r}
+# my_palette <- c(
+#   "" = "#666666",
+#   "" = "#1B9E77",
+#   "" = "#D95F02",
+#   "" = "#7570B3"
+# )
+
+unique(metadata$Group)
+#unique(metadata$timepoint)
+#unique(metadata$subject)
+
+    # "HIHGNO" = "#1B9E77",
+    # "LILGAS" = "#D95F02",
+    # "HIHGAS" = "#7570B3"
+
+# Define colors
+my_palette_heatmap <- list(
+  Group = c(
+    Control = "#1B9E77",
+    high_BMI = "#D95F02",
+    T1D = "#7570B3"
+  )
+)
+
+```
+
+### all DEGs
+for DEGs with padj < 0.05
+```{r}
+# generate heatmap metadata (annotation_col)
+colnames(metadata)
+heatmap_metadata <- metadata %>%
+  #filter(Group == "RE") %>%
+  arrange(Group) %>%
+  dplyr::select(c(Sample, Group)) %>%
+  mutate(Group = factor(Group,
+         levels = c("Control",
+                    "high_BMI",
+                    "T1D"))) %>%
+  column_to_rownames("Sample")
+
+# retrieve genes of interest
+#select DEGs for all contrasts (padj < 0.05)
+heatmap_genes <- c()
+for (contrast in contrasts) {
+  genes <- contrast %>%
+    filter(padj < 0.05) %>%
+    pull(symbol)
+  heatmap_genes <- union(heatmap_genes, genes)
+  remove(genes, contrast)
+}
+
+# # edit color palette
+# my_palette_heatmap_RE <- my_palette_heatmap
+# my_palette_heatmap_RE$subject <- my_palette_heatmap$subject[grepl(
+#   "RE", names(my_palette_heatmap$subject))]
+
+# generate heatmap matrix
+heatmap_counts <- normalized_counts %>%
+  dplyr::filter(hgnc_symbol %in% heatmap_genes)
+
+heatmap_counts <- heatmap_counts %>%
+  dplyr::arrange(desc(matrixStats::rowVars(as.matrix(
+    heatmap_counts %>%
+      dplyr::select(dplyr::matches(rownames(heatmap_metadata)))
+  )))) %>%
+  column_to_rownames("hgnc_symbol") %>%
+  dplyr::select(dplyr::matches(rownames(heatmap_metadata)))
+```
+
+Without gene labels
+```{r}
+heatmap <- pheatmap::pheatmap(heatmap_counts,
+  cluster_rows = T,
+  cluster_cols = F,
+  scale = "row",
+  clustering_distance_rows = "euclidean",
+  #cutree_rows = 4,
+  show_rownames = F, show_colnames = F,
+  cellwidth = 3,
+  #cellheight = 4,
+  treeheight_row = 5,
+  treeheight_col = 15,
+  fontsize = 6,
+  fontsize_row = 4,
+  fontsize_col = 5,
+  border_color = NA,
+  gaps_col = c(5, 9),
+  annotation_colors = my_palette_heatmap,
+  annotation_col = heatmap_metadata,
+  color = colorRampPalette(
+    rev(RColorBrewer::brewer.pal(11, "RdBu"))
+  )(256)
+)
+```
+
+Save plot
+```{r}
+filename <- "heatmap_significant_zcore_clustered"
+for (file_format in file_formats) {
+  ggsave(
+    plot = heatmap,
+    paste0(
+      "../03_figures/",
+      filename_prefix,
+      filename, ".",
+      file_format
+    ),
+    units = "mm",
+    dpi = 300,
+    width = 100,
+    height = 60
+  )
+}
+```
+
+With gene labels
+```{r}
+heatmap <- pheatmap::pheatmap(heatmap_counts,
+  cluster_rows = T,
+  cluster_cols = F,
+  scale = "row",
+  clustering_distance_rows = "euclidean",
+  #cutree_rows = 4,
+  show_rownames = T, show_colnames = F,
+  cellwidth = 3,
+  cellheight = 4,
+  treeheight_row = 5,
+  treeheight_col = 15,
+  fontsize = 6,
+  fontsize_row = 4,
+  fontsize_col = 5,
+  border_color = NA,
+  gaps_col = c(5, 9),
+  annotation_colors = my_palette_heatmap,
+  annotation_col = heatmap_metadata,
+  color = colorRampPalette(
+    rev(RColorBrewer::brewer.pal(11, "RdBu"))
+  )(256)
+)
+```
+
+Save plot
+```{r}
+filename <- "heatmap_significant_zcore_clustered_labels"
+for (file_format in file_formats) {
+  ggsave(
+    plot = heatmap,
+    paste0(
+      "../03_figures/",
+      filename_prefix,
+      filename, ".",
+      file_format
+    ),
+    units = "mm",
+    dpi = 300,
+    width = 100,
+    height = 50
+  )
+}
+```
+
+```{r echo=FALSE}
+cat("Saved file :", paste0(
+  "../03_figures/",
+  filename_prefix, filename,
+  ".pdf"
+))
+```
+
+## MA Plots
+```{r}
+for (i in seq_along(contrasts)) {
+group <- names(contrasts)[i] %>% str_extract(".*(?=_vs_)")
+group_ref <- names(contrasts)[i] %>% str_extract("(?<=_vs_).*")
+data <- contrasts[[i]]
+
+size_sig <- 0.5
+size_ns <- 0.2
+plot_title <- paste0("**", group, " vs ", group_ref,"**")
+
+# scico(3, palette = "navia")
+# "#021326" "#408A7F" "#FCF3D8"
+
+color_ns <- "#878787"
+color_up <- "#B2182B"
+color_down <- "#2166AC"
+#color_low = "#3869A8"
+#color_high = "#D3D5DA"
+color_low = "#67001F"
+color_high = "#4393C3"
+#color_low = "#FB9A99"
+#color_high = "#E31A1C"
+
+
+
+ma <- ggplot(data, aes(
+  x = log2(baseMean),
+  y = log2FoldChange
+)) +
+  ggplot2::geom_point(
+    data = filter(data, padj > 0.05 | is.na(padj)),
+    colour = color_ns,
+    size = size_ns
+  ) +
+  ggplot2::geom_point(
+    data = filter(data, padj < 0.05) %>%
+      arrange(-padj), aes(colour = padj), size = size_sig
+  ) +
+  xlab("log<sub>2</sub> mean expression") +
+  ylab("log<sub>2</sub> fold-change") +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  ggtitle(plot_title) +
+  gg_theme() +
+  scale_color_gradient(
+    low = color_low, high = color_high,
+    limits = c(0, 0.05), oob = scales::squish
+  ) +
+  #geom_hline(yintercept = 1, linetype = "dotted") +
+  #geom_hline(yintercept = -1, linetype = "dotted") +
+  annotate("text",
+    x = max(log2(data$baseMean)), 
+    #y = max(data$log2FoldChange),
+    y = 4,
+    label = paste0(
+      #group,": ",
+      "Increased: ",
+      nrow(filter(data, padj < 0.05 & log2FoldChange > 0))
+    ),
+    hjust = 1, vjust = 1, size = 5 / ggplot2:::.pt
+  ) +
+  annotate("text",
+    x = max(log2(data$baseMean)),
+    #y = min(data$log2FoldChange),
+    y = -4,
+    label = paste0(
+      #group_ref,
+      "Decreased: ",
+      nrow(filter(data, padj < 0.05 & log2FoldChange < 0))
+    ),
+    hjust = 1, vjust = 0, size = 5 / ggplot2:::.pt
+  ) +
+  coord_cartesian(ylim = c(-4, 4), expand = T) +
+  theme(legend.position = "right") +
+  geom_label_repel(
+    data = filter(data, padj < 0.05 & log2FoldChange > 0) %>% dplyr::slice(1:10),
+    aes(label = hgnc_symbol),
+    size = 5 / ggplot2:::.pt,
+    force = 2,
+    label.padding = 0.1,
+    # face
+    direction = "both",
+    max.overlaps = 10,
+    #nudge_x = -2,
+    #nudge_y = 1,
+    min.segment.length = 0,
+    segment.size = 0.25
+  )  +
+  geom_label_repel(
+    # data = filter(data, padj < 0.05) %>% dplyr::slice(1:15),
+    data = filter(data, hgnc_symbol%in%gene2plot),
+    aes(label = hgnc_symbol),
+    size = 5 / ggplot2:::.pt,
+    force = 2,
+    label.padding = 0.1,
+    # face
+    direction = "both",
+    max.overlaps = 20,
+    # nudge_x = 2,
+    nudge_y = 1,
+    min.segment.length = 0,
+    segment.size = 0.25
+  ) 
+ma
+
+# save plot
+filename <- paste0(group, "_vs_", group_ref)
+
+for (file_format in file_formats) {
+  ggsave_fixed(
+    paste0(
+      "../03_figures/",
+      "MA_plot_",
+      filename, ".",
+      file_format
+    ),
+    units = "mm",
+    plot_width = 30,
+    plot_height = 30,
+    width = 50,
+    height = 50
+  )
+}
+}
+```
+
+# R session info
+```{r}
+utils:::print.sessionInfo(sessionInfo()[-8])
+```

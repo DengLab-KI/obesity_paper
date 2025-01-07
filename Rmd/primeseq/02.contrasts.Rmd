@@ -1,0 +1,580 @@
+---
+title: "DESeq2 contrasts - gene level"
+subtitle: "Trophoblast organoids collected at passage 3"
+author: "Data analysis: Paulo Jannig | Karolinska Institutet"
+date: "`r paste('Last update:', format(Sys.time(), '%B %d, %Y'))`"
+output: 
+  html_document:
+    toc: true
+    toc_float: 
+      collapsed: false
+    toc_depth: 3
+    number_sections: true
+    theme: spacelab
+    highlight: default
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+## set work dir as this script's dir
+setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+
+```
+
+
+```{r}
+# define variables ==========================================
+filename_prefix <- "" # leave empty if not necessary
+species <- "human" # mouse, human, pig, rat
+ensembl_version <- 102 # define ensembl release version
+
+file_formats <- list(
+  "png",
+  "pdf"
+)
+
+# load libraries
+required_Packages_Install <- c(
+  "tidyverse",
+  "DESeq2",
+  "DT",
+  "RColorBrewer",
+  "ggrepel",
+  "ggtext",
+  "biomaRt",
+  "scales",
+  "writexl",
+  "limma"
+)
+
+for(Package in required_Packages_Install){
+  if(!require(Package,character.only = TRUE)) { 
+    BiocManager::install(Package, dependencies=TRUE)
+  }
+  library(Package,character.only = TRUE)
+}
+
+# source custom functions
+source("load_functions.R") # source custom functions
+```
+
+
+# Import data
+
+## Import dds
+```{r}
+dds <- readRDS("../02.results/deseq2/dds.Rds")
+dds <- readRDS("../02.results/deseq2/dds2.Rds")
+```
+
+## Import biomaRt annotation
+```{r}
+annotation <- readRDS(
+  "../02.results/deseq2/biomart_annotation.Rds"
+)
+colnames(annotation)
+```
+
+## Metadata
+
+```{r}
+metadata <- readRDS("../01_metadata/metadata.Rds")
+colnames(metadata)
+metadata$Sample
+unique(metadata$Group)
+```
+
+# DEseq2 Contrast workflow
+List coefficients
+```{r}
+design(dds)
+resultsNames(dds)
+```
+
+## With LFC Shrink
+### Contrast 1
+```{r}
+group <- "GroupLILG_AS"
+group_ref <- "GroupLILG_NO"
+
+res <- lfcShrink(dds,
+  contrast = list(
+    group, group_ref
+  ), type = "ashr"
+)
+# 
+# res <- results(dds, 
+#                contrast = list("GroupHIHGAS", 
+#                                "GroupLILGAS"))
+# res <- results(dds, 
+#                contrast = list(paste0("Group",group),
+#                                paste0("Group",group_ref)
+#                                )
+#                )
+summary(res, alpha = 0.05)
+
+df <- as.data.frame(res) %>%
+  rownames_to_column(symbol) %>%
+  dplyr::left_join(annotation, by = symbol) %>%
+  relocate(ensembl_gene_id, gene_biotype, log2FoldChange, padj, chromosome_name, gene_biotype, .after = symbol) %>%
+  arrange(padj)
+
+# replace empty gene symbols by ensembl_gene_id
+df[, symbol] <- ifelse(df[, symbol] == "", df$ensembl_gene_id, df[, symbol])
+df[, "ensembl_gene_id"] <- ifelse(df[, "ensembl_gene_id"] == "", 
+                                df$hgnc_symbol, df[, "ensembl_gene_id"])
+
+
+# replace NA gene symbols by ensembl_gene_id
+na_symbol <- is.na(df[, "ensembl_gene_id"])
+
+df[na_symbol, "ensembl_gene_id"] <- df[na_symbol, symbol]
+
+res.sig <- filter(as.data.frame(df), 
+                  padj < 0.05)
+nrow(res.sig)
+
+res.sig2 <- filter(as.data.frame(df), 
+                  padj < 0.05 & abs(log2FoldChange) > 10)
+
+sprintf("Total sig: %s", nrow(res.sig2))
+sprintf("UP: %s; DOWN: %s", 
+        nrow(res.sig %>% filter(log2FoldChange > 0)), 
+        nrow(res.sig %>% filter(log2FoldChange < 0)))
+
+sprintf("Total sig with abs(LFC>1): %s", nrow(res.sig2))
+sprintf("UP: %s; DOWN: %s", 
+        nrow(res.sig2 %>% filter(log2FoldChange >1)), 
+        nrow(res.sig2 %>% filter(log2FoldChange < -1)))
+
+```
+Export results
+```{r}
+filename <- paste0("deseq2_",group, "_vs_", group_ref, "pairwise_lfcShrink")
+# filename <- paste0("deseq2_", group, "_lfcShrink")
+write.csv(df, paste0(
+  "../02.results/deseq2/",
+  filename_prefix,
+  filename,
+  ".csv"
+),
+row.names = F, quote = F
+)
+
+saveRDS(df, paste0(
+  "../02.results/deseq2/",
+  filename_prefix,
+  filename,
+  ".RDS"
+))
+
+write_xlsx(df, paste0(
+  "../04.supplements/",
+  filename_prefix,
+  filename,
+  ".xlsx"
+))
+```
+
+#### Results table
+```{r}
+filename <- paste0("deseq2_",group, "_vs_", group_ref, "_lfcShrink")
+df%>% filter(padj < 0.05) %>% DT::datatable(
+  extensions = "Buttons",
+  options = list(
+    scrollX = TRUE,
+    pageLength = 50,
+    dom = "Blfrtip",
+    buttons = list(
+      list(extend = "csv", filename = paste0(filename_prefix, filename)),
+      list(extend = "excel", filename = paste0(filename_prefix, filename))
+    )
+  )
+)
+```
+
+### Contrast 2
+```{r}
+group <- "MediumHIHG.ASAS"
+group_ref <- "MediumHIHG"
+
+res <- lfcShrink(dds,
+  contrast = list(
+    group, group_ref
+  ), type = "ashr"
+)
+res <- lfcShrink(dds,
+  coef = ""
+    group, type = "ashr"
+)
+# res <- results(dds, 
+#                contrast = list(paste0("Group",group),
+#                                paste0("Group",group_ref)
+#                                )
+#                )
+
+summary(res, alpha = 0.05)
+
+df <- as.data.frame(res) %>%
+  rownames_to_column(symbol) %>%
+  dplyr::left_join(annotation, by = symbol) %>%
+  relocate(ensembl_gene_id, gene_biotype, log2FoldChange, padj, chromosome_name, gene_biotype, .after = symbol) %>%
+  arrange(padj)
+
+# replace empty gene symbols by ensembl_gene_id
+df[, symbol] <- ifelse(df[, symbol] == "", df$ensembl_gene_id, df[, symbol])
+df[, "ensembl_gene_id"] <- ifelse(df[, "ensembl_gene_id"] == "", 
+                                df$hgnc_symbol, df[, "ensembl_gene_id"])
+
+
+# replace NA gene symbols by ensembl_gene_id
+na_symbol <- is.na(df[, "ensembl_gene_id"])
+
+df[na_symbol, "ensembl_gene_id"] <- df[na_symbol, symbol]
+
+
+res.sig <- filter(as.data.frame(df), 
+                  padj < 0.05)
+nrow(res.sig)
+
+res.sig2 <- filter(as.data.frame(df), 
+                  padj < 0.05 & abs(log2FoldChange) > 10)
+
+sprintf("Total sig: %s", nrow(res.sig2))
+sprintf("UP: %s; DOWN: %s", 
+        nrow(res.sig %>% filter(log2FoldChange > 0)), 
+        nrow(res.sig %>% filter(log2FoldChange < 0)))
+
+sprintf("Total sig with abs(LFC>1): %s", nrow(res.sig2))
+sprintf("UP: %s; DOWN: %s", 
+        nrow(res.sig2 %>% filter(log2FoldChange >1)), 
+        nrow(res.sig2 %>% filter(log2FoldChange < -1)))
+
+```
+
+Export results
+```{r}
+filename <- paste0("deseq2_",group, "_vs_", group_ref, "_lfcShrink")
+
+write.csv(df, paste0(
+  "../02.results/deseq2/",
+  filename_prefix,
+  filename,
+  ".csv"
+),
+row.names = F, quote = F
+)
+
+saveRDS(df, paste0(
+  "../02.results/deseq2/",
+  filename_prefix,
+  filename,
+  ".RDS"
+))
+
+write_xlsx(df, paste0(
+  "../04.supplements/",
+  filename_prefix,
+  filename,
+  ".xlsx"
+))
+```
+
+#### Results table
+```{r}
+filename <- paste0("deseq2_",group, "_vs_", group_ref, "_lfcShrink")
+df %>% filter(padj < 0.05) %>% DT::datatable(
+  extensions = "Buttons",
+  options = list(
+    scrollX = TRUE,
+    pageLength = 50,
+    dom = "Blfrtip",
+    buttons = list(
+      list(extend = "csv", filename = paste0(filename_prefix, filename)),
+      list(extend = "excel", filename = paste0(filename_prefix, filename))
+    )
+  )
+)
+```
+### Contrast 3
+```{r}
+group <- "MediumHIHG"
+group_ref <- "MediumLILG"
+
+res <- lfcShrink(dds,
+  contrast = list(
+    group, group_ref
+  ), type = "ashr"
+)
+# res <- results(dds, 
+#                contrast = list(paste0("Group",group),
+#                                paste0("Group",group_ref)
+#                                )
+#                )
+
+summary(res, alpha = 0.05)
+
+df <- as.data.frame(res) %>%
+  rownames_to_column(symbol) %>%
+  dplyr::left_join(annotation, by = symbol) %>%
+  relocate(ensembl_gene_id, gene_biotype, log2FoldChange, padj, chromosome_name, gene_biotype, .after = symbol) %>%
+  arrange(padj)
+
+# replace empty gene symbols by ensembl_gene_id
+df[, symbol] <- ifelse(df[, symbol] == "", df$ensembl_gene_id, df[, symbol])
+df[, "ensembl_gene_id"] <- ifelse(df[, "ensembl_gene_id"] == "", 
+                                df$hgnc_symbol, df[, "ensembl_gene_id"])
+
+
+# replace NA gene symbols by ensembl_gene_id
+na_symbol <- is.na(df[, "ensembl_gene_id"])
+
+df[na_symbol, "ensembl_gene_id"] <- df[na_symbol, symbol]
+
+
+res.sig <- filter(as.data.frame(df), 
+                  padj < 0.05)
+nrow(res.sig)
+
+res.sig2 <- filter(as.data.frame(df), 
+                  padj < 0.05 & abs(log2FoldChange) > 1)
+
+sprintf("Total sig: %s", nrow(res.sig2))
+sprintf("UP: %s; DOWN: %s", 
+        nrow(res.sig %>% filter(log2FoldChange > 0)), 
+        nrow(res.sig %>% filter(log2FoldChange < 0)))
+
+sprintf("Total sig with abs(LFC>1): %s", nrow(res.sig2))
+sprintf("UP: %s; DOWN: %s", 
+        nrow(res.sig2 %>% filter(log2FoldChange >1)), 
+        nrow(res.sig2 %>% filter(log2FoldChange < -1)))
+
+```
+
+Export results
+```{r}
+filename <- paste0("deseq2_",group, "_vs_", group_ref, "_lfcShrink")
+
+write.csv(df, paste0(
+  "../02.results/deseq2/",
+  filename_prefix,
+  filename,
+  ".csv"
+),
+row.names = F, quote = F
+)
+
+saveRDS(df, paste0(
+  "../02.results/deseq2/",
+  filename_prefix,
+  filename,
+  ".RDS"
+))
+
+write_xlsx(df, paste0(
+  "../04.supplements/",
+  filename_prefix,
+  filename,
+  ".xlsx"
+))
+```
+
+#### Results table
+```{r}
+filename <- paste0("deseq2_",group, "_vs_", group_ref, "_lfcShrink")
+df %>% filter(padj < 0.05) %>% DT::datatable(
+  extensions = "Buttons",
+  options = list(
+    scrollX = TRUE,
+    pageLength = 50,
+    dom = "Blfrtip",
+    buttons = list(
+      list(extend = "csv", filename = paste0(filename_prefix, filename)),
+      list(extend = "excel", filename = paste0(filename_prefix, filename))
+    )
+  )
+)
+```
+
+
+# Normalized counts
+```{r}
+
+dds <- readRDS("../02_results/deseq2/dds.Rds")
+
+## calculate size factor
+dds <- estimateSizeFactors(dds)
+```
+## normalized gene counts
+```{r}
+# ## add normalizatoinFactors
+normalized_counts <- data.frame(counts(dds, 
+                                       normalized = TRUE))
+colnames(normalized_counts)
+
+colnames(normalized_counts) <- metadata$Sample
+
+colnames(normalized_counts)
+
+normalized_counts <- normalized_counts %>%
+  rownames_to_column(symbol) %>%
+  dplyr::left_join(annotation, by = symbol) %>%
+  relocate(ensembl_gene_id, gene_biotype, chromosome_name, gene_biotype, .after = symbol)
+
+# replace empty gene symbols by ensembl_gene_id
+normalized_counts[, symbol] <- ifelse(normalized_counts[, symbol] == "", normalized_counts$ensembl_gene_id, normalized_counts[, symbol])
+normalized_counts[, "ensembl_gene_id"] <- ifelse(normalized_counts[, "ensembl_gene_id"] == "", 
+                                normalized_counts$hgnc_symbol, normalized_counts[, "ensembl_gene_id"])
+
+
+# replace NA gene symbols by ensembl_gene_id
+na_symbol <- is.na(normalized_counts[, "ensembl_gene_id"])
+
+normalized_counts[na_symbol, "ensembl_gene_id"] <- normalized_counts[na_symbol, symbol]
+```
+Save normalized counts
+```{r}
+filename <- "deseq2_normalized_counts"
+write.csv(normalized_counts, paste0(
+  "../02_results/deseq2/",
+  filename_prefix,
+  filename,
+  ".csv"
+),
+row.names = F, quote = F
+)
+
+saveRDS(normalized_counts, paste0(
+  "../02_results/deseq2/",
+  filename_prefix,
+  filename,
+  ".Rds"
+))
+```
+
+
+```{r echo=FALSE}
+cat("Saved file :", paste0(
+  "../02_results/deseq2/",
+  filename_prefix,
+  filename,
+  ".csv"
+))
+```
+
+## log2 Normalized counts
+```{r}
+normCounts.log2.df <- data.frame(log2(counts(dds, normalized=TRUE))) %>%
+  rownames_to_column(symbol) %>%
+  dplyr::left_join(annotation, by = symbol) %>%
+  relocate(ensembl_gene_id, gene_biotype, chromosome_name, gene_biotype, .after = symbol)
+
+# replace empty gene symbols by ensembl_gene_id
+normCounts.log2.df[, symbol] <- ifelse(normCounts.log2.df[, symbol] == "", normCounts.log2.df$ensembl_gene_id, normCounts.log2.df[, symbol])
+normCounts.log2.df[, "ensembl_gene_id"] <- ifelse(normCounts.log2.df[, "ensembl_gene_id"] == "", 
+                                normCounts.log2.df$hgnc_symbol, normCounts.log2.df[, "ensembl_gene_id"])
+
+
+# replace NA gene symbols by ensembl_gene_id
+na_symbol <- is.na(normCounts.log2.df[, "ensembl_gene_id"])
+
+normCounts.log2.df[na_symbol, "ensembl_gene_id"] <- normCounts.log2.df[na_symbol, symbol]
+```
+
+Save log2 normalized counts
+```{r}
+filename <- "deseq2_normalized_counts_log2"
+write.csv(normCounts.log2.df, paste0(
+  "../02_results/deseq2/",
+  filename_prefix,
+  filename,
+  ".csv"
+),
+row.names = F, quote = F
+)
+
+saveRDS(normCounts.log2.df, paste0(
+  "../02_results/deseq2/",
+  filename_prefix,
+  filename,
+  ".Rds"
+))
+```
+
+
+```{r echo=FALSE}
+cat("Saved file :", paste0(
+  "../02_results/deseq2/",
+  filename_prefix,
+  filename,
+  ".csv"
+))
+```
+
+
+# Supplementary table
+```{r}
+filename <- "deseq2_normalized_counts"
+
+excel <- list(
+  normalized_counts = normalized_counts
+)
+
+write_xlsx(excel, paste0(
+  "../04_supplements/",
+  filename_prefix,
+  filename,
+  ".xlsx"
+))
+
+
+filename <- "deseq2_normalized_counts_log2"
+
+excel <- list(
+  log2_normalized_counts = normCounts.log2.df
+)
+
+write_xlsx(excel, paste0(
+  "../04_supplements/",
+  filename_prefix,
+  filename,
+  ".xlsx"
+))
+```
+
+
+```{r}
+plotCounts(dds, 
+           gene="LINC01446", 
+           intgroup="Group")
+
+```
+
+```{r}
+plotCounts(dds, 
+           gene="NQO1", 
+           intgroup="Group")
+
+```
+
+
+# R session info
+```{r}
+utils:::print.sessionInfo(sessionInfo()[-8])
+```
+
+# References
+
+- Love MI, Huber W, Anders S. 2014. Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2. Genome Biol 15:550. <a href="https://doi.org/10.1186/s13059-014-0550-8" target="_blank" rel="noopener">Link</a>
+
+<a href="https://bioconductor.org/help/course-materials/2022/CSAMA/lab/2-tuesday/lab-03-rnaseq/rnaseqGene_CSAMA2022.html" target="_blank" rel="noopener">RNA-seq workflow: gene-level exploratory analysis and differential expression</a>
+
+<a href="https://www.bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html" target="_blank" rel="noopener">Analyzing RNA-seq data with DESeq2</a>
+
+

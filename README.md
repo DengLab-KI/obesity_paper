@@ -1,11 +1,9 @@
 # Notebooks replicating the figures in Obesity manuscript
 
 - ipynb/process_10x-cellbender.ipynb
-
   - pre-process and cluster:
 
 - ipynb/marker_dotplots.ipynb
-
   - cell type markers dot plot
 
 - ipynb/stb_recluster.py
@@ -40,8 +38,9 @@
   - generate the adjency matrix
   - ipynb/network_rl.ipynb: network analysis
 
-- Rmd/intersect_TO_tissue.Rmd
-  - intersect of all sets
+- Rmd/Primeseq/*
+  - downstream analysis of Primeseq data from trophoblast organoids
+  - Rmd/intersect_TO_tissue.Rmd: intersect of all sets
 
 - ipynb/venn.ipynb
   - Venn: draw venn diagram

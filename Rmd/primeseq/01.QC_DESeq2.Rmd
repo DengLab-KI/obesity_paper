@@ -1,0 +1,947 @@
+---
+title: "RNA-seq Downstream Analysis"
+subtitle: "QC and DESeq"
+author: "Data analysis: Paulo Jannig | Karolinska Institutet"
+date: "`r paste('Last update:', format(Sys.time(), '%B %d, %Y'))`"
+output: 
+  html_document:
+    toc: true
+    toc_float: 
+      collapsed: false
+    toc_depth: 3
+    number_sections: true
+    theme: spacelab
+    highlight: default
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r}
+setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+```
+
+```{r}
+# load libraries
+required_Packages_Install <- c(
+  "tidyverse",
+  "DESeq2",
+  "RColorBrewer",
+  "ggrepel",
+  "ggtext",
+  "biomaRt",
+  "scales",
+  "writexl",
+  "readxl",
+  "limma"
+)
+
+take_input_default <- function(prompt, default){
+  output <- readline(prompt = prompt)
+  ifelse(output == "", default, output)
+}
+# define variables ==========================================
+experiment_ID <- take_input_default(prompt = "Enter experiment ID: ", default="example")
+filename_prefix <- take_input_default(prompt = "Enter filename prefix", default="example") # leave empty if not necessary
+species <- take_input_default(prompt = "Enter species, e.g.: mouse, human, pig, rat: ", default="human") # mouse, human, pig, rat
+ensembl_version <- take_input_default(prompt = "Enter ensembl version: ", default=102) # define ensembl release version
+
+file_formats <- list(
+  #"png",
+  "pdf"
+)
+
+for(Package in required_Packages_Install){
+  if(!require(Package,character.only = TRUE)) { 
+    BiocManager::install(Package, dependencies=TRUE)
+  }
+  library(Package,character.only = TRUE)
+}
+
+# source custom functions
+source("load_functions.R") # source custom functions
+```
+
+# Import data
+```{r}
+counts <- readRDS(paste0("../testdata/mat/",experiment_ID,".dgecounts.rds"))
+metadata <- read_excel("../testdata/metadata/sampleInfo.xlsx")
+## depend on the up stream analysis
+gene.info <- read.csv(paste0("../testdata/mat/", experiment_ID, ".gene_names.txt"), sep = "\t")
+```
+
+# Metadata
+```{r}
+colnames(metadata)
+unique(metadata$Group)
+```
+
+```{r}
+metadata <- metadata %>%
+  mutate(
+    Group = factor(Group, levels = c(
+      "HIHG",
+      "HIHG_AS",
+      "LILG",
+      "LILG_AS"
+))
+  ) %>%
+  arrange(Group)
+
+levels(metadata$Group)
+
+metadata <- metadata |> separate(Group, c("Medium", "AS"), sep = "_")
+metadata[is.na(metadata)] <- "NO"
+metadata$Medium <- factor(metadata$Medium, levels=c('LILG', "HIHG"))
+metadata$AS <- factor(metadata$AS, levels = c("NO", "AS"))
+```
+
+Any duplicated oligos?
+```{r}
+sum(duplicated(metadata$Oligo))
+```
+
+save metadata
+```{r}
+filename <- "metadata"
+write.csv(metadata, paste0(
+  "../01.metadata//",
+  filename_prefix,
+  filename, ".csv"
+),
+row.names = F, quote = F
+)
+
+saveRDS(metadata, paste0(
+  "../01.metadata/",
+  filename_prefix,
+  filename,
+  ".Rds"
+))
+```
+
+
+### Metadata table
+```{r}
+filename <- "metadata"
+metadata %>% DT::datatable(
+  extensions = "Buttons",
+  options = list(
+    scrollX = TRUE,
+    pageLength = nrow(metadata),
+    dom = "Blfrtip",
+    buttons = list(
+      list(extend = "csv", filename = paste0(filename_prefix, filename)),
+      list(extend = "excel", filename = paste0(filename_prefix, filename))
+    )
+  )
+)
+```
+# make inex matrix
+```{r mk_inex_mat, include=T}
+frds_inex <- as.matrix(counts$umicount$inex$all)
+rownames(frds_inex) <- factor(rownames(frds_inex),
+                                levels = gene.info$gene_id,
+                                labels = gene.info$gene_name)
+frds_inex.sum <- aggregate(frds_inex, 
+                             list(row.names(frds_inex)), 
+                             sum)
+rownames(frds_inex.sum) <- frds_inex.sum$Group.1
+frds_inex.sum$Group.1 <- NULL
+
+counts.df <- frds_inex.sum %>%
+  dplyr::select(metadata$Oligo) %>%
+  rename_all(~metadata$Sample)
+
+head(counts.df)
+```
+
+
+# DESeq2
+```{r}
+# make sure columns of the count matrix and the rows of the column data (information about samples) are in the same order
+colnames(counts.df)
+metadata$Group <- paste(metadata$Medium, metadata$AS, sep="_")
+
+# DEseq2
+dds <- DESeqDataSetFromMatrix(
+  countData = counts.df,
+  colData = metadata,
+  design = ~ 0 + Medium*AS
+)
+dds2 <- DESeqDataSetFromMatrix(
+  countData = counts.df,
+  colData = metadata,
+  design = ~ 0 + Group
+)
+#dds <- estimateSizeFactors(dds)
+nrow(dds)
+dds <- dds2
+
+levels(dds$Group)
+
+# Count how many genes with 0 counts (TRUE)
+table(rowSums(assay(dds, "counts")) == 0)
+
+```
+
+# QC plots
+```{r qc}
+qc.tb <- data.frame(
+  Sample = metadata$Sample,
+  gene_number = colSums(counts(dds) > 0),
+  MT_proportion = colSums(counts(dds)[grepl("^MT-", rownames(dds)),]) / colSums(counts(dds)) * 100,
+  Rb_proportion = colSums(counts(dds)[grepl("^RPS|^RPL|^MRP", rownames(dds)),]) / colSums(counts(dds)) * 100,
+  bc_batch = colnames(dds),
+  Group = factor(metadata$Group, levels = levels(metadata$Group))
+)
+
+library(ggpubr)
+g <- ggdotplot(qc.tb,
+  x = "Group",
+  y = "gene_number",
+  # add = "mean_sd",
+  color = "Group",
+  palette = "jco"
+) + gg_theme() + 
+  theme(axis.text.x = ggtext::element_markdown(angle = 45, hjust = 1))
+
+mt <- ggdotplot(qc.tb,
+  x = "Group",
+  y = "MT_proportion",
+  #add = "mean_sd",
+  color = "Group",
+  palette = "jco"
+) + gg_theme() + 
+  theme(axis.text.x = ggtext::element_markdown(angle = 45, hjust = 1)) 
+
+
+rb <- ggdotplot(qc.tb,
+  x = "Group",
+  y = "Rb_proportion",
+  #add = "mean_sd",
+  color = "Group",
+  palette = "jco"
+) + gg_theme() + 
+  theme(axis.text.x = ggtext::element_markdown(angle = 45, hjust = 1)) 
+
+ggpubr::ggarrange(g, NULL, 
+                  mt, rb, 
+                  ncol = 2, 
+                  nrow = 2) 
+
+
+```
+Save plot
+```{r}
+filename <- "QC_plot"
+for (file_format in file_formats) {
+  ggsave_fixed(
+    paste0(
+      "../03.figures/",
+      filename_prefix,
+      filename, ".",
+      file_format
+    ),
+    units = "mm",
+    plot_width = 80,
+    plot_height = 80,
+    width = 100,
+    height = 100
+  )
+}
+```
+
+# QC Filtering
+```{r}
+detected <- colSums(counts(dds) > 0)
+boxplot(detected, width = 0.01) 
+```
+
+```{r}
+sprintf("original gene number: %s; original sample number: %s", nrow(dds), ncol(dds))
+```
+
+
+```{r}
+keep.samples <- colSums(counts(dds) > 0) >= 12000
+sprintf('number of samples expressing more than 12k genes: %s', sum(keep.samples))
+```
+
+```{r}
+keep.samples.mito <- colSums(counts(dds[grepl("^MT-", rownames(dds)), ])) / colSums(counts(dds)) <= 0.2
+sprintf('number of samples with no more than 20%% mitochondrial gene expression: %s', sum(keep.samples.mito))
+```
+
+```{r}
+dds.filter.sample <- dds[, keep.samples & keep.samples.mito]
+keep.genes <- rowSums(counts(dds.filter.sample) > 0) >= 3
+sprintf('number of genes expressed in more than 3 samples: %s', sum(keep.genes))
+```
+
+filter genes with mean counts less than or equal to 1 according to https://www.nature.com/articles/s41597-019-0131-5#Sec2
+```{r}
+keep.genes.mean <- rowMeans(counts(dds.filter.sample)) > 1
+sprintf('number of genes with mean counts more than 1: %s', sum(keep.genes.mean))
+```
+
+Remove MT and RPS and RPL genes
+```{r}
+keep.genes.mtrpsrpl <- !grepl("^MT-|^RPS|^RPL|^MIR|^MRP", rownames(dds.filter.sample))
+# dds.filter <- dds[keep.genes & keep.genes.mean & keep.genes.mtrpsrpl, keep.samples & keep.samples.mito]
+dds.filter <- dds[keep.genes & keep.genes.mean & keep.genes.mtrpsrpl, keep.samples]
+#dds.filter <- dds.filter[cov, ]
+sprintf('retained gene number: %s; retained sample number: %s', nrow(dds.filter), ncol(dds.filter))
+```
+
+check which samples were removed
+```{r}
+setdiff(dds$Sample, dds.filter$Sample)
+```
+
+# DESeq2
+```{r}
+design(dds.filter)
+
+dds <- DESeq(dds.filter)
+
+# dds <- DESeq(dds.filter, 
+#              betaPrior = FALSE)
+
+resultsNames(dds)
+levels(dds$Group)
+
+# dds$Group <- factor(dds$Group, levels = c("HIHGNO", 
+#                                           "LILGAS", 
+#                                           "HIHGAS"))
+```
+
+save dds file
+```{r}
+filename <- "dds2"
+saveRDS(dds, file = paste0(
+  "../02.results/deseq2/",
+  filename_prefix,
+  filename, ".Rds"
+))
+```
+
+# biomaRt annotation
+retrieve gene ensembl annotation 
+```{r}
+# If biomaRt fails, check:
+# https://stackoverflow.com/questions/77370659/error-failed-to-collect-lazy-table-caused-by-error-in-db-collect-using
+
+# # Run
+# install.packages("devtools")
+#devtools::install_version("dbplyr", version = "2.3.4")
+
+annotation <- biomaRt::getBM(
+  filters = symbol,
+  attributes = c(
+    "ensembl_gene_id",
+    symbol,
+    "entrezgene_id",
+    "chromosome_name",
+    "gene_biotype"
+  ),
+  values = rownames(dds),
+  mart = useEnsembl("ensembl",
+    dataset = dataset,
+    # mirror = "useast",
+    version = ensembl_version
+  )
+)
+
+annotation <- annotation %>%
+  dplyr::filter(!startsWith(chromosome_name, "CHR"))
+
+non_unique_df <- annotation %>%
+  group_by(hgnc_symbol) %>%
+  filter(n() > 1)
+
+annotation <- annotation %>%
+  group_by(hgnc_symbol) %>%
+  dplyr::slice(1)
+
+```
+
+
+Save biomaRt annotation
+```{r}
+filename <- "biomart_annotation"
+write.csv(annotation, paste0(
+  "../02.results/deseq2/",
+  filename_prefix,
+  filename,
+  ".csv"
+),
+row.names = F, quote = F
+)
+
+saveRDS(annotation, paste0(
+  "../02.results/deseq2/",
+  filename_prefix,
+  filename,
+  ".Rds"
+))
+```
+
+# PCA plots
+
+## for PCA analysis
+```{r}
+## calculate size factor
+dds.filter <- estimateSizeFactors(dds.filter)
+
+## add normalizatoinFactors
+# dds.filter <- estimateDispersions(dds.filter)
+
+## PCA
+normCounts <- log1p(counts(dds.filter, 
+                           normalized = TRUE))
+
+normCounts.df <- data.frame(log1p(counts(dds.filter, 
+                                         normalized = TRUE)))
+
+normalized_counts <- data.frame(counts(dds.filter, normalized = T)) %>%
+  rownames_to_column(symbol)
+
+```
+
+```{r}
+vsd <- DESeq2::vst(dds.filter, blind = FALSE)
+DESeq2::plotPCA(vsd, intgroup = c("Group"))
+```
+
+
+```{r}
+rld <- DESeq2::rlog(dds.filter, blind = FALSE)
+DESeq2::plotPCA(rld, intgroup = c("Group"))
+```
+
+## vsd
+```{r}
+levels(dds.filter$Group)
+vsd <- DESeq2::vst(dds.filter, blind = FALSE)
+
+#rld <- DESeq2::rlog(dds.filter, blind = FALSE)
+
+variable1 <- "Group"
+#variable2 <- "Delivery"
+palette_pca <- brewer.pal(n = 4, name = "Dark2")
+
+pca_data <- DESeq2::plotPCA(vsd, 
+                            intgroup = variable1, 
+                            #intgroup = c(variable1,variable2), 
+                            returnData = TRUE)
+# Calculating the percentage of variance explained by PC1 and PC2
+percent_var <- round(100 * attr(pca_data, "percentVar"))
+
+segments <- pca_data %>%
+    dplyr::group_by(!!as.symbol(variable1)) %>%
+    dplyr::summarise(xend = mean(PC1), yend = mean(PC2))
+pca_data <- merge(pca_data, segments, by = variable1)
+
+pca_data2 <- pca_data %>%
+  left_join(metadata, by = c("name" = "Oligo"))
+```
+
+### with segments
+```{r}
+pca <- pca_data %>%
+  ggplot2::ggplot(ggplot2::aes(PC1, PC2)) +
+  # ggforce::geom_mark_ellipse(
+  #   aes(
+  #     fill = !!as.symbol(variable1),
+  #     color = !!as.symbol(variable1)
+  #   ),
+  #   expand = unit(1, "mm"),
+  #   size = 0,
+  #   tol = 0.001
+  # ) +
+  ggplot2::geom_point(
+    data = segments,
+    ggplot2::aes(
+      x = xend, y = yend,
+      color = !!as.symbol(variable1)
+    ),
+    size = 0.5
+  ) +
+  ggplot2::geom_segment(
+    ggplot2::aes(
+      x = PC1, y = PC2, xend = xend, yend = yend,
+      fill = !!as.symbol(variable1),
+      color = !!as.symbol(variable1)
+    ),
+    linewidth = 0.3,
+    linetype = "solid"
+  ) +
+  ggplot2::geom_point(
+    aes(
+      color = !!as.symbol(variable1),
+      fill = !!as.symbol(variable1),
+      #shape = !!as.symbol(variable2)
+    ),
+    size = 2,
+    # shape = 21,
+    # color = "black",
+  ) +
+  ggplot2::xlab(paste0("PC1: ", percent_var[1], "% variance")) +
+  ggplot2::ylab(paste0("PC2: ", percent_var[2], "% variance")) +
+  gg_theme() +
+  ggplot2::theme(legend.position = "right") +
+  ggplot2::scale_shape_manual(values = c(21:25)) +
+  # ggplot2::scale_color_manual(values = viridis::viridis(3 + 1)) +
+  # ggplot2::scale_fill_manual(values = viridis::viridis(3 + 1)) +
+  ggplot2::scale_color_manual(values = palette_pca) +
+  ggplot2::scale_fill_manual(values = palette_pca) +
+  scale_x_continuous(expand = c(0.1, 0.1)) +
+  scale_y_continuous(expand = c(0.1, 0.1)) +
+  ggtitle("**Principal component analysis**")
+pca 
+```
+
+```{r}
+pca + geom_text_repel(aes(label = name),
+    size = 5 / ggplot2:::.pt,
+    nudge_x = 1,
+    nudge_y = 1,
+    segment.colour = NA
+  )
+```
+
+
+
+Save plot
+```{r}
+filename <- "PCA_plot_vsd_segment"
+for (file_format in file_formats) {
+  ggsave_fixed(
+    paste0(
+      "../03.figures/",
+      filename_prefix,
+      filename, ".",
+      file_format
+    ),
+    units = "mm",
+    plot_width = 40,
+    plot_height = 40,
+    width = 65,
+    height = 60
+  )
+}
+```
+
+
+
+### with segments + ellipse
+```{r}
+pca + ggforce::geom_mark_ellipse(
+  aes(
+    fill = !!as.symbol(variable1),
+    color = !!as.symbol(variable1)
+  ),
+  expand = unit(1, "mm"),
+  size = 0,
+  tol = 0.001
+)
+```
+
+Save plot
+```{r}
+filename <- "PCA_plot_vsd_segment_ellipse"
+for (file_format in file_formats) {
+  ggsave_fixed(
+    paste0(
+      "../03.figures/",
+      filename_prefix,
+      filename, ".",
+      file_format
+    ),
+    units = "mm",
+    plot_width = 40,
+    plot_height = 40,
+    width = 65,
+    height = 60
+  )
+}
+```
+
+
+
+
+### only ellipses
+```{r}
+pca <- pca_data %>%
+  ggplot2::ggplot(ggplot2::aes(PC1, PC2)) +
+  # ggplot2::geom_point(size = 2)
+  ggplot2::geom_point(
+    aes(
+      color = !!as.symbol(variable1),
+      fill = !!as.symbol(variable1),
+      #shape = !!as.symbol(variable2)
+    ),
+    size = 2,
+    # shape = 21,
+    # color = "black",
+  ) +
+  ggplot2::xlab(paste0("PC1: ", percent_var[1], "% variance")) +
+  ggplot2::ylab(paste0("PC2: ", percent_var[2], "% variance")) +
+  gg_theme() +
+  ggplot2::theme(legend.position = "right") +
+  ggplot2::scale_shape_manual(values = c(21:25)) +
+  # ggplot2::scale_color_manual(values = viridis::viridis(3 + 1)) +
+  # ggplot2::scale_fill_manual(values = viridis::viridis(3 + 1)) +
+  ggplot2::scale_color_manual(values = palette_pca) +
+  ggplot2::scale_fill_manual(values = palette_pca) +
+  ggforce::geom_mark_ellipse(
+    aes(
+      fill = !!as.symbol(variable1),
+      color = !!as.symbol(variable1)
+    ),
+    expand = unit(1, "mm"),
+    size = 0,
+    tol = 0.001
+  ) +
+  scale_x_continuous(expand = c(0.2, 0.2)) +
+  scale_y_continuous(expand = c(0.2, 0.2)) +
+  ggtitle("**Principal component analysis**")
+pca + geom_text_repel(aes(label = name),
+    size = 3 / ggplot2:::.pt,
+    nudge_x = 1,
+    nudge_y = -1,
+    min.segment.length = 0,
+    #force = 3,
+    #box.padding = unit(0.1, "lines"),
+    segment.size=0.25,
+    segment.colour = "black"
+  )
+
+```
+Save plot
+```{r}
+filename <- "PCA_plot_vsd_ellipse"
+for (file_format in file_formats) {
+  ggsave_fixed(
+    paste0(
+      "../03.figures/",
+      filename_prefix,
+      filename, ".",
+      file_format
+    ),
+    units = "mm",
+    plot_width = 40,
+    plot_height = 40,
+    width = 65,
+    height = 60
+  )
+}
+```
+
+
+
+## PCA log normalized counts
+```{r}
+#pca <- DESeq2::plotPCA(vsd, intgroup = c("Group"), returnData = TRUE)
+#pca <- prcomp(t(assay(dds.filter)))
+#pca <- prcomp(t(counts(dds.filter, normalized = T)))
+pca <- prcomp(t(normCounts))
+
+pca.df <- as.data.frame(pca$x)
+
+total_var <- sum(var(pca.df))
+# Calculating the percentage of variance explained by PC1 and PC2
+percent_var_PC1 <- round((var(pca.df$PC1) / total_var) * 100, 1)
+percent_var_PC2 <- round((var(pca.df$PC2) / total_var) * 100, 1)
+
+pca.df <- as.data.frame(pca$x) %>%
+  mutate(
+    Sample = factor(rownames(pca.df),
+                    levels = metadata$Sample,
+                    labels = metadata$Sample),
+    Group = factor(rownames(pca.df),
+                   levels = metadata$Sample,
+                   labels = metadata$Group)
+  ) 
+
+pca.df <- pca.df %>%
+  mutate(Group = factor(Group, levels = levels(metadata$Group)
+  ))
+
+```
+
+
+
+```{r}
+
+palette_pca <- brewer.pal(n = 4, name = "Dark2")
+variable1 <- "Group"
+#variable2 <- "Delivery"
+
+pca <- pca.df %>%
+  ggplot2::ggplot(ggplot2::aes(PC1, PC2)) +
+  # ggplot2::geom_point(size = 2)
+  ggplot2::geom_point(
+    aes(
+      color = !!as.symbol(variable1),
+      fill = !!as.symbol(variable1),
+      #shape = !!as.symbol(variable2)
+    ),
+    size = 2,
+    # shape = 21,
+    # color = "black",
+  ) +
+  ggplot2::xlab(paste0("PC1: ", percent_var_PC1, "% variance")) +
+  ggplot2::ylab(paste0("PC2: ", percent_var_PC2, "% variance")) +
+  gg_theme() +
+  ggplot2::theme(legend.position = "right") +
+  ggplot2::scale_shape_manual(values = c(21:25)) +
+  # ggplot2::scale_color_manual(values = viridis::viridis(3 + 1)) +
+  # ggplot2::scale_fill_manual(values = viridis::viridis(3 + 1)) +
+  ggplot2::scale_color_manual(values = palette_pca) +
+  ggplot2::scale_fill_manual(values = palette_pca) +
+  ggforce::geom_mark_ellipse(
+    aes(
+      fill = !!as.symbol(variable1),
+      color = !!as.symbol(variable1)
+    ),
+    expand = unit(2, "mm"),
+    size = 0,
+    tol = 0.001
+  ) +
+  scale_x_continuous(expand = c(0.2, 0.2)) +
+  scale_y_continuous(expand = c(0.2, 0.2)) +
+  ggtitle("**Principal component analysis**")
+pca + geom_text_repel(aes(label = Sample),
+    size = 3 / ggplot2:::.pt,
+    nudge_x = 1,
+    nudge_y = -1,
+    min.segment.length = 0,
+    #force = 3,
+    #box.padding = unit(0.1, "lines"),
+    segment.size=0.25,
+    segment.colour = "black"
+  )
+```
+
+Save plot
+```{r}
+filename <- "PCA_plot_logNormCounts"
+for (file_format in file_formats) {
+  ggsave_fixed(
+    paste0(
+      "../03.figures/",
+      filename_prefix,
+      filename, ".",
+      file_format
+    ),
+    units = "mm",
+    plot_width = 40,
+    plot_height = 40,
+    width = 65,
+    height = 60
+  )
+}
+```
+
+
+
+
+```{r}
+library("FactoMineR")
+library("factoextra")
+
+res.pca <- FactoMineR::PCA(t(normCounts), graph = FALSE)
+get_eig(res.pca)
+#pdf('principle_components.pdf')
+screeplot <- fviz_screeplot(res.pca, 
+               addlabels = FALSE, 
+               #labelsize = 3,
+               ylim = c(0, 30)) + 
+  gg_theme()
+
+#ggplot2:::.pt
+
+#dev.off()
+screeplot
+
+```
+
+
+```{r}
+# Save plot
+filename <- "screeplot"
+for (file_format in file_formats) {
+  ggsave_fixed(
+    paste0(
+      "../03.figures/",
+      filename_prefix,
+      filename, ".",
+      file_format
+    ),
+    units = "mm",
+    plot_width = 40,
+    plot_height = 20,
+    width = 60,
+    height = 50
+  )
+}
+```
+
+
+
+
+```{r}
+var <- get_pca_var(res.pca)
+head(var$coord)
+head(var$contrib)
+
+#pdf('../03.figures/Principal_components_var_contrbution.pdf')
+fviz_pca_var(res.pca, col.var = "black") + gg_theme()
+#dev.off()
+```
+Save plot
+```{r}
+filename <- "Principal_components_var_contribution"
+for (file_format in file_formats) {
+  ggsave_fixed(
+    paste0(
+      "../03.figures/",
+      filename_prefix,
+      filename, ".",
+      file_format
+    ),
+    units = "mm",
+    plot_width = 100,
+    plot_height = 100,
+    width = 150,
+    height = 150
+  )
+}
+```
+
+
+```{r}
+#pdf('../03.figures/PC1_contribution_top10.pdf')
+fviz_contrib(res.pca, choice = "var", axes = 1, top = 10) + 
+  gg_theme() + 
+  theme(
+    axis.text.x = ggtext::element_markdown(angle = 45, hjust = 1)) + 
+  xlab("")
+#dev.off()
+```
+
+Save plot
+```{r}
+filename <- "PC1_contribution_top10"
+for (file_format in file_formats) {
+  ggsave_fixed(
+    paste0(
+      "../03.figures/",
+      filename_prefix,
+      filename, ".",
+      file_format
+    ),
+    units = "mm",
+    plot_width = 40,
+    plot_height = 20,
+    width = 60,
+    height = 50
+  )
+}
+```
+
+
+```{r}
+#pdf("../03.figures/PC2_contribution_top10.pdf")
+fviz_contrib(res.pca, choice = "var", axes = 2, top = 10) +
+  gg_theme() +
+  theme(
+    axis.text.x = ggtext::element_markdown(angle = 45, hjust = 1)
+  ) +
+  xlab("")
+#dev.off()
+```
+Save plot
+```{r}
+filename <- "PC2_contribution_top10"
+for (file_format in file_formats) {
+  ggsave_fixed(
+    paste0(
+      "../03.figures/",
+      filename_prefix,
+      filename, ".",
+      file_format
+    ),
+    units = "mm",
+    plot_width = 40,
+    plot_height = 20,
+    width = 60,
+    height = 50
+  )
+}
+```
+
+# Sample-to-sample distances
+```{r, fig.width = 6, fig.height = 6, fig.align = "center"}
+vsd <- vst(dds.filter, blind = FALSE)
+sampleDists <- dist(t(assay(vsd)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(vsd$Group, vsd$Sample, sep = " - ")
+colnames(sampleDistMatrix) <- NULL
+heatmap <- pheatmap::pheatmap(sampleDistMatrix,
+  clustering_distance_rows = sampleDists,
+  clustering_distance_cols = sampleDists,
+  show_rownames = T, show_colnames = T,
+  cellwidth = 6,
+  cellheight = 6,
+  treeheight_row = 10,
+  treeheight_col = 10,
+  fontsize = 6,
+  border_color = NA,
+  col = colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+)
+```
+
+```{r}
+# Save plot
+filename <- "sample_distances"
+for (file_format in file_formats) {
+  ggsave(
+    plot = heatmap,
+    paste0(
+      "../03.figures/",
+      filename_prefix,
+      filename, ".",
+      file_format
+    ),
+    units = "mm",
+    dpi = 300,
+    width = 7 * length(metadata$Sample),
+    height = 3 * length(metadata$Sample)
+  )
+}
+```
+
+# R session info
+```{r}
+utils:::print.sessionInfo(sessionInfo()[-8])
+```
+
+# References
+
+- Love MI, Huber W, Anders S. 2014. Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2. Genome Biol 15:550. <a href="https://doi.org/10.1186/s13059-014-0550-8" target="_blank" rel="noopener">Link</a>
+
+<a href="https://bioconductor.org/help/course-materials/2022/CSAMA/lab/2-tuesday/lab-03-rnaseq/rnaseqGene_CSAMA2022.html" target="_blank" rel="noopener">RNA-seq workflow: gene-level exploratory analysis and differential expression</a>
+
+<a href="https://www.bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html" target="_blank" rel="noopener">Analyzing RNA-seq data with DESeq2</a>
+
+
