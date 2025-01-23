@@ -1,4 +1,10 @@
-# Notebooks replicating the figures in Obesity manuscript
+# Obesity Manuscript analysis
+
+## Workflow and Methods
+
+![Workflow](workflow.png)
+
+## Notebooks replicating the figures in Obesity manuscript
 
 - ipynb/process_10x-cellbender.ipynb
   - pre-process and cluster:
