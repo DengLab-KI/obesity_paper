@@ -1,0 +1,120 @@
+---
+title: "DEGs by cell type"
+author: "Hong Jiang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    fig_caption: yes
+    theme:
+      bootswatch: sandstone
+      base_font:
+        "Arial"
+      code_font:
+        google: "JetBrains Mono"
+      progress-bar-bg: "orange"
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+## set work dir as this file's dir
+setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+```
+``` {r library, include = TRUE}
+library(zellkonverter) ## for read in h5 files
+library(Seurat)
+library(biomaRt)
+library(MAST)
+library(tidyverse)
+library(data.table)
+library(dplyr)
+library(reshape2)
+library(stringr)
+library(xlsx)
+```
+```{r data, include = TRUE, echo= TRUE, eval = FALSE}
+data <-
+  readH5AD("/mnt/run/jh/projects/obesity_sc/output/h5ad/ad_v3.h5ad", reader = "python")
+
+data.seurat <- as.Seurat(data, counts = 'raw', data = 'log_norm')
+saveRDS(data.seurat, "../output/10x_h5/h5ad/ad_v2.rds")
+
+Idents(data.seurat) <- data.seurat@meta.data$subset_combined
+## subset ctb and stb cells
+ctb_stb <- subset(data.seurat, idents = c("CTB", "STB"))
+
+ctb_stb_ctl <-
+    ctb_stb[,ctb_stb@meta.data$group=="Normal_AGA"]
+## filter genes less than 10%
+ctb_stb_ctl <- subset(ctb_stb_ctl, features = rownames(ctb_stb_ctl)[Matrix::rowSums(ctb_stb_ctl@assays$originalexp@counts > 0) > 0.1 * ncol(ctb_stb_ctl)])
+
+## find all markers and plot top ten genes heatmap
+chrX <- unique(read.csv("/mnt/run/jh/projects/pcos_sc/data/chrX_genenames.txt", sep = "\t", header = T)["Gene.name"])
+chrY <- unique(read.csv("/mnt/run/jh/projects/pcos_sc/data/chrY_genenames.txt", sep = "\t", header = T)["Gene.name"])
+## remove chrX and chrY genes
+ctb_stb_ctl_auto <- subset(ctb_stb_ctl, features = rownames(ctb_stb_ctl)[!rownames(ctb_stb_ctl) %in% chrX$Gene.name & !rownames(ctb_stb_ctl) %in% chrY$Gene.name])
+## random sample STB to 1288 cells
+stb_cells <- WhichCells(ctb_stb_ctl_auto, idents = "STB")
+if (length(stb_cells) < 1288) {
+  warning(sprintf("STB has only %d cells; keeping all of them.", length(stb_cells)))
+  stb_keep <- stb_cells
+} else {
+  stb_keep <- sample(stb_cells, size = 1288, replace = FALSE)
+}
+
+other_cells <- setdiff(Cells(ctb_stb_ctl_auto), stb_cells)
+ctb_stb_ctl_auto <- subset(ctb_stb_ctl_auto, cells = c(other_cells, stb_keep))
+Idents(ctb_stb_ctl_auto) <- ctb_stb_ctl_auto@meta.data$subset_combined
+all.markers <- FindAllMarkers(
+  ctb_stb_ctl_auto,
+  test.use = "MAST",
+  slot = "data",
+  logfc.threshold = 1,
+  only.pos = TRUE,
+  random.seed = 404,
+  min.diff.pct = 0.1,
+  return.thresh = 0.05,
+)
+
+## write out to excel
+write.xlsx(all.markers, "/mnt/run/jh/projects/obesity_sc/output/degs/STB_CTB_DEGs_nosex.xlsx")
+```
+
+```{r export, include = TRUE, echo= TRUE, eval = FALSE}
+
+obj <- ctb_stb_ctl_auto
+
+# Get raw counts
+counts <- GetAssayData(obj, assay = DefaultAssay(obj), slot = "counts")
+
+# Rename columns to Idents (CTB/STB), allowing duplicate column names
+idents <- as.character(Idents(obj)[colnames(counts)])
+colnames(counts) <- idents
+
+# Build export with first column 'Genes' and all sample (cell) columns
+export_df <- data.frame(
+  Genes = rownames(counts),
+  as.matrix(counts),
+  check.names = FALSE
+)
+
+# Write CSV (rows = 4708 genes, columns = 1+2576 [Genes + samples])
+outfile <- "/mnt/run/jh/projects/obesity_sc/output/degs/ctb_stb_counts_by_ident.tsv"
+write.table(export_df, outfile, row.names = TRUE, sep = "\t")
+```
+
+## filter
+```{r filter, include = TRUE, echo= TRUE, eval = FALSE}
+counts <- read.csv("/mnt/run/jh/projects/obesity_sc/output/degs/ctb_stb_counts_by_ident.tsv", sep = "\t", row.names = 1)
+degs <- read.xlsx("/mnt/run/jh/projects/obesity_sc/output/degs/STB_CTB_DEGs_nosex.xlsx", sheetIndex = 1)
+degs_counts <- counts[rownames(counts) %in% unlist(degs["NA."]), ]
+names(degs_counts) <- sub("\\..*$", "", names(degs_counts))
+write.table(degs_counts, "/mnt/run/jh/projects/obesity_sc/output/degs/degs_counts.tsv", sep = "\t", row.names = F)
+```

@@ -1,0 +1,365 @@
+---
+title: "Coculture analysis"
+author: "Hong Jiang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    fig_caption: yes
+    theme:
+      bootswatch: sandstone
+      base_font:
+        "Arial"
+      code_font:
+        google: "JetBrains Mono"
+      progress-bar-bg: "orange"
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+## set work dir as this script's dir
+setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+```
+```{r library, include=F}
+library(DESeq2)
+library(stringr)
+library(dplyr)
+library(plotly)
+library(tidyr)
+library(ggplot2)
+library(ggrepel)
+```
+## This is for simple illustration
+
+```{r data, include=T}
+microfluid <-
+  readRDS("/mnt/run/jh/projects/obesity_sc/data/Organoids_coculture1.dgecounts.rds")
+microfluid2 <-
+  readRDS("/mnt/run/jh/projects/obesity_sc/data/coculture_2nd.dgecounts.rds")
+microfluid.sample.info <- read.csv("/mnt/run/jh/projects/obesity_sc/data/SampleInfoTable.txt", sep = "\t")
+microfluid.sample.info.2 <- read.csv("/mnt/run/jh/projects/obesity_sc/data/sampleInfoTable_2.txt", sep = "\t")
+
+microfluid.g.info <- read.csv("/mnt/run/jh/projects/obesity_sc/data/Organoids_coculture1.gene_names.txt", sep = "\t")
+microfluid.g.info.2 <- read.csv("/mnt/run/jh/projects/obesity_sc/data/coculture_2nd.gene_names.txt", sep = "\t")
+
+```
+### make inex matrix
+```{r mk_inex_mat, include=T}
+mk_inex_mat <- function(frds, sample.info, g.info) {
+  frds_inex <- as.matrix(frds$umicount$inex$all)
+  ## replace gene id with gene names
+  rownames(frds_inex) <- factor(rownames(frds_inex), levels = g.info$gene_id, labels = g.info$gene_name)
+  frds_inex.sum <- aggregate(frds_inex, list(row.names(frds_inex)), sum)
+  rownames(frds_inex.sum) <- frds_inex.sum$Group.1
+  frds_inex.sum$Group.1 <- NULL
+  frds_inex.sum <- frds_inex.sum[, order(colnames(frds_inex.sum))]
+  rownames(sample.info) <- sample.info$Oligo
+  sample.info <- sample.info[order(rownames(sample.info)), ]
+  #print(head(sample.info))
+  frds_inex.sum[, colnames(frds_inex.sum) %in% rownames(sample.info)]
+}
+microfluid_inex <- mk_inex_mat(microfluid, microfluid.sample.info, microfluid.g.info)
+microfluid_inex.2 <- mk_inex_mat(microfluid2, microfluid.sample.info.2, microfluid.g.info.2)
+```
+## Add batch info and unique barcodes
+Considering they could be duplicated in different batches
+```{r add_batch, include=T}
+
+unique.cols <- function(cv, batch){
+  paste0(cv, batch)
+}
+colnames(microfluid_inex) <- unique.cols(colnames(microfluid_inex), microfluid.sample.info$platform)
+
+rownames(microfluid_inex) <- microfluid.sample.info$bc
+```
+## for microfluidic
+```{r mkdds, include=T}
+common.features <- intersect(rownames(microfluid_inex), rownames(microfluid_inex.2))
+microfluid_inex <- microfluid_inex[common.features, ]
+microfluid_inex.2 <- microfluid_inex.2[common.features, ]
+## for large matrices merge takes memory and too slow
+### check rownames and cbind
+sum(c(rownames(microfluid_inex) == rownames(microfluid_inex.2))==F)
+inex.all <- cbind(microfluid_inex, microfluid_inex.2)
+sample.info.all <- rbind(microfluid.sample.info, microfluid.sample.info.2)
+sample.info.all <- sample.info.all |> mutate(Group = paste0(Medium, Coculture))
+sample.info.all$biobatch <- factor(sample.info.all$Batch, levels = c("1", "2", "3"), labels=c('1', '1', '2'))
+## are these oligos unique?
+sum(duplicated(sample.info.all$Oligo))
+## NO, then no need to use the (previous) unique block to unique oligos with the information of batch and platform
+rownames(sample.info.all) = sample.info.all$Oligo
+## order the sample.info.all according to the order of the colnames of inex.all
+sample.info.all <- sample.info.all[colnames(inex.all), ]
+dds <- DESeqDataSetFromMatrix(
+  countData = inex.all,
+  colData = sample.info.all,
+  design = ~ 0 + Group + biobatch
+)
+```
+
+### filtering
+```{r filter}
+detected <- colSums(counts(dds) > 0)
+boxplot(detected, width = 0.01)
+sprintf("original gene number: %s; original sample number: %s", nrow(dds), ncol(dds))
+keep.samples <- colSums(counts(dds) > 0) >= 11000
+sprintf('number of samples expressed more than 12k genes: %s', sum(keep.samples))
+keep.samples.mito <- colSums(counts(dds[grepl("^MT-", rownames(dds)), ])) / colSums(counts(dds)) <= 0.4
+sprintf('number of samples with no more than 10%% mitochondra gene expression: %s', sum(keep.samples.mito))
+dds.filter.sample <- dds[, keep.samples & keep.samples.mito]
+keep.genes <- rowSums(counts(dds.filter.sample) > 0) >= 3
+sprintf('number of genes expressed in more than 3 samples: %s', sum(keep.genes))
+## filter genes with mean counts less than or equal to 1 according to https://www.nature.com/articles/s41597-019-0131-5#Sec2
+keep.genes.mean <- rowMeans(counts(dds.filter.sample)) > 1
+sprintf('number of genes with mean counts more than 1: %s', sum(keep.genes.mean))
+## Remove MT and RPS and RPL genes
+keep.genes.mtrpsrpl <- !grepl("^MT-|^RPS|^RPL|^MIR|^MRP", rownames(dds.filter.sample))
+# dds.filter <- dds[keep.genes & keep.genes.mean & keep.genes.mtrpsrpl, keep.samples & keep.samples.mito]
+dds.filter <- dds[keep.genes & keep.genes.mean & keep.genes.mtrpsrpl, keep.samples & keep.samples.mito]
+#dds.filter <- dds.filter[cov, ]
+sprintf('retained gene number: %s; retained sample number: %s', nrow(dds.filter), ncol(dds.filter))
+```
+
+### save out filtered count matrix
+```{r save_filtered_count_matrix}
+dds.filter.counts <- counts(dds.filter)
+colnames(dds.filter.counts) <- colData(dds.filter)$Sample
+write.table(dds.filter.counts, "/mnt/run/jh/projects/obesity_sc/output/organoids/filtered_count_matrix.txt", sep = "\t")
+```
+
+### QC plot
+```{r qc}
+qc.tb <- data.frame(gene_number = colSums(counts(dds) > 0), MT_proportion = colSums(counts(dds)[grepl("^MT-", rownames(dds)),])/colSums(counts(dds))*100, Rb_proportion = colSums(counts(dds)[grepl("^RPS|^RPL|^MRP", rownames(dds)),])/colSums(counts(dds))*100)
+qc.tb$bc <- colnames(dds)
+qc.tb$Group <- factor(qc.tb$bc, levels = sample.info.all$Oligo, labels = sample.info.all$Group)
+qc.tb$biobatch <- sample.info.all$biobatch
+library(ggpubr)
+g <- ggdotplot(qc.tb,
+  x = "Group", y = "gene_number",add = "mean_sd",
+  color = "biobatch", palette = "jco"
+)
+mt <- ggdotplot(qc.tb,
+  x = "Group", y = "MT_proportion", add = "mean_sd",
+  color = "biobatch", palette = "jco"
+)
+rb <- ggdotplot(qc.tb,
+  x = "Group", y = "Rb_proportion", add = "mean_sd",
+  color = "biobatch", palette = "jco"
+)
+ggarrange(g, NULL, mt, rb, ncol = 2, nrow = 2) |> ggexport(filename = "QC.pdf")
+```
+### DEGs Wald test
+```{r norm}
+# dds.filter$Medium <- relevel(dds.filter$Medium, "LILG")
+# dds.filter$Coculture <- relevel(dds.filter$Coculture, "NO")
+# dds.des <- DESeq(dds.filter)
+dds.des <- DESeq(dds.filter, betaPrior = FALSE)
+# head(normCounts)
+```
+### DEG results and volcano plot
+```{r norm}
+resultsNames(dds.des)
+res.medium.coculture <- results(dds.des, contrast = list("GroupHIHGAS", "GroupLILGAS"))
+## Effects of AS coculture with LILG medium
+res.coculture <- results(dds.des, contrast = list("GroupHIHGAS", "GroupHIHGNO"))
+## Effects of AS coculture with HIHG medium
+res.coculture.hihg <- results(dds.des, contrast = list("GroupHIHGNO", "GroupLILGAS"))
+# res.sig <- filter(as.data.frame(res), padj < 0.05 & abs(log2FoldChange) > 1)
+# write.table(res.sig, "res.sig.txt", sep = "\t")
+res.sig.medium <- filter(as.data.frame(res.medium), padj < 0.05 & abs(log2FoldChange) > 1)
+res.sig.coculture <- filter(as.data.frame(res.coculture), padj < 0.05 & abs(log2FoldChange) > 1)
+write.table(res.sig.coculture, "HIHGAS_vs_HIHGNO_clean.txt", sep = "\t")
+res.sig.medium.coculture <- filter(as.data.frame(res.medium.coculture), padj < 0.05 & abs(log2FoldChange) > 1)
+write.table(res.sig.medium.coculture, "HIHGAS_vs_LILGAS_clean.txt", sep = "\t")
+res.sig.coculture.hihg <- filter(as.data.frame(res.coculture.hihg), padj < 0.05 & abs(log2FoldChange) > 1)
+write.table(res.sig.coculture.hihg, "HIHGNO_vs_LILGAS_clean.txt", sep = "\t")
+dim(res.sig)
+dim(res.sig.medium)
+dim(res.sig.coculture)
+  EnhancedVolcano(res.medium.coculture ,
+    lab = rownames(res.medium.coculture),
+    x = "log2FoldChange",
+    y = "padj",
+    pCutoff = 0.05,
+    ylim = c(0, 5)
+  )
+  ggsave("HIHGAS_vs_LILGAS_clean_volcano.pdf", width = 10, height = 10)
+dim(res.sig.coculture)
+EnhancedVolcano(res.coculture,
+  lab = rownames(res.coculture),
+  x = "log2FoldChange",
+  y = "padj",
+  pCutoff = 0.05
+)
+ggsave("HIHGAS_vs_HIHGNO_clean_volcano.pdf", width = 4.5, height = 4.5)
+EnhancedVolcano(res.coculture.hihg,
+  lab = rownames(res.coculture),
+  x = "log2FoldChange",
+  y = "padj",
+  pCutoff = 0.05
+)
+ggsave("HIHGNO_vs_LILGAS_clean_volcano.pdf", width = 4, height = 4.5)
+```
+
+## LRT test
+```{r}
+dds <- DESeq(dds.filter, test = "LRT", reduced = ~biobatch)
+resultsNames(dds)
+res.medium.coculture <- results(dds, contrast = list("GroupHIHGAS", "GroupLILGAS"))
+## Effects of AS coculture with LILG medium
+res.coculture <- results(dds, contrast = list("GroupHIHGAS", "GroupHIHGNO"))
+## Effects of AS coculture with HIHG medium
+res.coculture.hihg <- results(dds, contrast = list("GroupHIHGNO", "GroupLILGAS"))
+# res.sig <- filter(as.data.frame(res), padj < 0.05 & abs(log2FoldChange) > 1)
+# write.table(res.sig, "res.sig.txt", sep = "\t")
+res.sig.medium <- filter(as.data.frame(res.medium), padj < 0.05 & abs(log2FoldChange) > 1)
+res.sig.coculture <- filter(as.data.frame(res.coculture), padj < 0.05 & abs(log2FoldChange) > 1)
+write.table(res.sig.coculture, "HIHGAS_vs_HIHGNO_clean_LRT_rm2.txt", sep = "\t")
+res.sig.medium.coculture <- filter(as.data.frame(res.medium.coculture), padj < 0.05 & abs(log2FoldChange) > 1)
+write.table(res.sig.medium.coculture, "HIHGAS_vs_LILGAS_clean_LRT_rm2.txt", sep = "\t")
+res.sig.coculture.hihg <- filter(as.data.frame(res.coculture.hihg), padj < 0.05 & abs(log2FoldChange) > 1)
+write.table(res.sig.coculture.hihg, "HIHGNO_vs_LILGAS_clean_LRT_rm2.txt", sep = "\t")
+
+EnhancedVolcano(res.medium.coculture,
+    lab = rownames(res.medium.coculture),
+    x = "log2FoldChange",
+    y = "padj",
+    # selectLab = c('CGA', 'FLT1', 'PSG11'),
+    pCutoff = 0.05,
+    ylim = c(0, 6),
+    # col = c("grey", "grey", "grey", "red"),
+    # drawConnectors = T,
+    # labSize = 6,
+    # typeConnectors = 'open',
+    # widthConnectors = 1,
+    # # lengthConnectors = unit(1,'cm'),
+    # arrowheads = T
+  )
+  ggsave("HIHGAS_vs_LILGAS_clean_volcano_LRT_rm2.pdf", width = 10, height = 10)
+  EnhancedVolcano(res.coculture,
+    lab = rownames(res.coculture),
+    x = "log2FoldChange",
+    y = "padj",
+    pCutoff = 0.05,
+    ylim = c(0, 6)
+  )
+  ggsave("HIHGAS_vs_HIHGNO_clean_volcano_LRT_rm2.pdf", width = 10, height = 10)
+  EnhancedVolcano(res.coculture.hihg,
+    lab = rownames(res.coculture),
+    x = "log2FoldChange",
+    y = "padj",
+    pCutoff = 0.05,
+    ylim = c(0, 6)
+  )
+  ggsave("HIHGNO_vs_LILGAS_clean_volcano_LRT_rm2.pdf", width = 10, height = 10)
+```
+
+## for PCA analysis before batch correction
+```{r}
+## calculate size factor
+dds.filter <- estimateSizeFactors(dds.filter)
+# ## add normalizatoinFactors
+# dds.filter <- estimateDispersions(dds.filter)
+## PCA
+normCounts <- log1p(counts(dds.filter, normalized = TRUE))
+library("FactoMineR")
+library("factoextra")
+res.pca <- PCA(t(normCounts), graph = FALSE)
+get_eig(res.pca)
+pdf('principle_components.pdf')
+fviz_screeplot(res.pca, addlabels = TRUE, ylim = c(0, 50))
+dev.off()
+var <- get_pca_var(res.pca)
+head(var$coord)
+head(var$contrib)
+pdf('Principal_components_var_contrbution.pdf')
+fviz_pca_var(res.pca, col.var = "black")
+dev.off()
+pdf('PC1_contribution_top10.pdf')
+fviz_contrib(res.pca, choice = "var", axes = 1, top = 10)
+dev.off()
+pdf("PC2_contribution_top10.pdf")
+fviz_contrib(res.pca, choice = "var", axes = 2, top = 10)
+dev.off()
+
+ind <- get_pca_ind(res.pca)
+
+sample.info.pc <- sample.info.all
+rownames(sample.info.pc) <- sample.info.pc$Oligo
+
+pca <- prcomp(t(normCounts))
+pca.df <- as.data.frame(pca$x)
+pca.df$Sample <- factor(rownames(pca.df), levels = sample.info.all$Oligo, labels = sample.info.all$Sample)
+pca.df$Medium <- factor(rownames(pca.df), levels = sample.info.all$Oligo, labels = sample.info.all$Medium)
+pca.df$Coculture <- factor(rownames(pca.df), levels = sample.info.all$Oligo, labels = sample.info.all$Coculture)
+pca.df$Batch <- factor(rownames(pca.df), levels = sample.info.all$Oligo, labels = sample.info.all$Batch)
+pca.df$Group <- factor(rownames(pca.df), levels = sample.info.all$Oligo, labels = sample.info.all$Group)
+pca.df$Biobatch <- factor(rownames(pca.df), levels = sample.info.all$Oligo, labels = sample.info.all$biobatch)
+ggplot(pca.df, aes(x = PC1, y = PC2, color = Biobatch, shape=Group)) +
+  geom_point() +
+  theme_bw()
+ggsave("PCA_group_clean_rm2.pdf", width = 5, height = 4)
+```
+
+## PCA after batch correction
+```{r}
+dds.pca <- dds.filter
+assay(dds.pca) <- limma::removeBatchEffect(normCounts, dds.filter$biobatch)
+## from here the assay of vsd are removed batch effects and thus could be used for downstream analysis,
+## such as gene expression visualization or ML
+res.pca <- PCA(t(assay(dds.pca)), graph = FALSE)
+pdf("principle_components_batchcorr_rm2.pdf")
+fviz_screeplot(res.pca, addlabels = TRUE, ylim = c(0, 50))
+dev.off()
+var <- get_pca_var(res.pca)
+head(var$coord)
+head(var$contrib)
+pdf("Principal_components_var_contrbution_batchcorr_rm2.pdf")
+fviz_pca_var(res.pca, col.var = "black")
+dev.off()
+pdf("PC1_contribution_top10_batchcorr_rm2.pdf")
+fviz_contrib(res.pca, choice = "var", axes = 1, top = 10)
+dev.off()
+pdf("PC2_contribution_top10_batchcorr_rm2.pdf")
+fviz_contrib(res.pca, choice = "var", axes = 2, top = 10)
+dev.off()
+
+pca <- prcomp(t(assay(dds.pca)))
+pca.df <- as.data.frame(pca$x)
+pca.df$Sample <- factor(rownames(pca.df), levels = sample.info.all$Oligo, labels = sample.info.all$Sample)
+pca.df$Medium <- factor(rownames(pca.df), levels = sample.info.all$Oligo, labels = sample.info.all$Medium)
+pca.df$Coculture <- factor(rownames(pca.df), levels = sample.info.all$Oligo, labels = sample.info.all$Coculture)
+pca.df$Batch <- factor(rownames(pca.df), levels = sample.info.all$Oligo, labels = sample.info.all$Batch)
+pca.df$Group <- factor(rownames(pca.df), levels = sample.info.all$Oligo, labels = sample.info.all$Group)
+pca.df$Biobatch <- factor(rownames(pca.df), levels = sample.info.all$Oligo, labels = sample.info.all$biobatch)
+go <- ggplot(pca.df, aes(x = PC1, y = PC2, color = Biobatch, shape = Group)) +
+  geom_point() +
+  theme_bw()
+ggsave("PCA_group_clean_lognorm_batchcorrect_rm1.pdf", width = 5, height = 4)
+
+res.pca <- PCA(t(assay(dds.pca)), graph = FALSE)
+ind <- get_pca_ind(res.pca)
+fviz_pca_ind(res.pca,
+  label = "none", # hide individual labels
+  habillage = as.factor(pca.df$Group), # color by groups
+  palette = c("#00AFBB", "#E7B800", "#FC4E07"),
+  addEllipses = TRUE # Concentration ellipses
+)
+library(ggbiplot)
+g <- ggbiplot(pca,
+  obs.scale = 1, var.scale = 1,
+  groups = pca.df$Group, ellipse = TRUE, circle = TRUE, varname.size = 0, var.axes = F, col = pca.df$Biobatch, shape = pca.df$Group
+)
+g <- g + scale_color_discrete(name = "")
+g + theme_bw()
+ggsave("PCA_group_clean_lognorm_batchcorrect_ec_rm1.pdf", width = 8, height = 4)
+```
+
+
